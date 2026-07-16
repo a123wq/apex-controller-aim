@@ -1,0 +1,16 @@
+[main] start
+[main] constructing App
+[App] ctor: initSDL
+[App] ctor: initOpenGL
+[App] ctor: initImGui
+[App] ctor: initModules
+[App] ctor: mouse capture
+[App] ctor: done
+[main] App constructed, entering run()
+[App] run: enter loop
+[main] run() returned cleanly
+[main] exit 0
+t] XInputGetState(1) returned 1167
+[Input] XInputGetState(2) returned 1167
+[Input] XInputGetState(3) returned 1167
+[Input] first scan done; connected index = 4294967295 (0xFFFFFFFF=none)

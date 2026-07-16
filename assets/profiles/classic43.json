@@ -1,0 +1,14 @@
+{
+    "ADSMultiplier": 0.6499999761581421,
+    "acceleration": 0.15000000596046448,
+    "curveExponent": 2.200000047683716,
+    "deadzone": 0.07999999821186066,
+    "deceleration": 0.11999999731779099,
+    "inputSmoothing": 0.11999999731779099,
+    "maxPitchSpeed": 360.0,
+    "maxYawSpeed": 420.0,
+    "microAimStrength": 0.4000000059604645,
+    "microAimThreshold": 0.15000000596046448,
+    "name": "Classic43",
+    "outerDeadzone": 0.019999999552965164
+}

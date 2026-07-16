@@ -1,0 +1,17 @@
+// =============================================================================
+// linear43.json — Linear 4-3 response curve profile
+// =============================================================================
+{
+    "name": "Linear43",
+    "deadzone": 0.06,
+    "outerDeadzone": 0.01,
+    "curveExponent": 1.0,
+    "microAimStrength": 0.20,
+    "microAimThreshold": 0.10,
+    "inputSmoothing": 0.05,
+    "maxYawSpeed": 420,
+    "maxPitchSpeed": 360,
+    "adsMultiplier": 0.65,
+    "acceleration": 0.0,
+    "deceleration": 0.0
+}
