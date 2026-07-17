@@ -193,7 +193,7 @@ m_camera.update(aa.yawSpeed, aa.pitchSpeed, dt);
 4. `src/Target.cpp` — 加 getVelocity。
 5. `src/Trainer.cpp` — update() 接线。
 6. `src/Profile.cpp` — 9 个 AA 参数 load/save/reload + 两个 default 函数。
-7. `src/UI.cpp` — Aim Assist 折叠头 + 签名。
+7. `src/UI.cpp` — Aim Assist 折叠头 + 签名。@
 8. `src/App.cpp` — m_ui.render 实参。
 9. `mingw32-make clean && mingw32-make` 构建验证。
 10. 用户侧手测清单（见上「验证」）。

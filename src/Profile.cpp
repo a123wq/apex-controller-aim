@@ -18,6 +18,16 @@ static AimProfile defaultClassic43() {
     p.adsMultiplier    = 0.65f;
     p.acceleration     = 0.15f;
     p.deceleration     = 0.12f;
+    // Aim assist defaults (PC coefficient; see AimProfile in App.hpp).
+    p.aaEnabled        = true;
+    p.aaBubbleAngle    = 4.0f;
+    p.aaMaxDistance    = 60.0f;
+    p.aaStickiness     = 0.30f;
+    p.aaRotationalGain = 0.40f;
+    p.aaPullGain       = 0.0f;
+    p.aaRotMaxSpeed    = 25.0f;
+    p.aaMovementGate   = 0.15f;
+    p.aaSmoothing      = 0.30f;
     return p;
 }
 
@@ -35,6 +45,16 @@ static AimProfile defaultLinear43() {
     p.adsMultiplier    = 0.65f;
     p.acceleration     = 0.00f;
     p.deceleration     = 0.00f;
+    // Aim assist defaults (PC coefficient; see AimProfile in App.hpp).
+    p.aaEnabled        = true;
+    p.aaBubbleAngle    = 4.0f;
+    p.aaMaxDistance    = 60.0f;
+    p.aaStickiness     = 0.30f;
+    p.aaRotationalGain = 0.40f;
+    p.aaPullGain       = 0.0f;
+    p.aaRotMaxSpeed    = 25.0f;
+    p.aaMovementGate   = 0.15f;
+    p.aaSmoothing      = 0.30f;
     return p;
 }
 
@@ -101,6 +121,18 @@ bool Profile::load(const std::string& name) {
         m_current.adsMultiplier    = j.value("ADSMultiplier", 0.65f);
         m_current.acceleration    = j.value("acceleration", 0.15f);
         m_current.deceleration     = j.value("deceleration", 0.12f);
+        // Aim assist — j.value defaults let old profile files without these
+        // keys load fine (filled with PC-coefficient defaults). Saving once
+        // persists them; no manual JSON editing required.
+        m_current.aaEnabled        = j.value("aaEnabled", true);
+        m_current.aaBubbleAngle    = j.value("aaBubbleAngle", 4.0f);
+        m_current.aaMaxDistance    = j.value("aaMaxDistance", 60.0f);
+        m_current.aaStickiness     = j.value("aaStickiness", 0.30f);
+        m_current.aaRotationalGain = j.value("aaRotationalGain", 0.40f);
+        m_current.aaPullGain       = j.value("aaPullGain", 0.0f);
+        m_current.aaRotMaxSpeed    = j.value("aaRotMaxSpeed", 25.0f);
+        m_current.aaMovementGate   = j.value("aaMovementGate", 0.15f);
+        m_current.aaSmoothing      = j.value("aaSmoothing", 0.30f);
         m_currentFile = getFilePath(name);
         return true;
     } catch (...) { return false; }
@@ -121,6 +153,15 @@ bool Profile::save(const std::string& name) {
     j["ADSMultiplier"]     = m_current.adsMultiplier;
     j["acceleration"]      = m_current.acceleration;
     j["deceleration"]      = m_current.deceleration;
+    j["aaEnabled"]         = m_current.aaEnabled;
+    j["aaBubbleAngle"]     = m_current.aaBubbleAngle;
+    j["aaMaxDistance"]     = m_current.aaMaxDistance;
+    j["aaStickiness"]      = m_current.aaStickiness;
+    j["aaRotationalGain"] = m_current.aaRotationalGain;
+    j["aaPullGain"]        = m_current.aaPullGain;
+    j["aaRotMaxSpeed"]     = m_current.aaRotMaxSpeed;
+    j["aaMovementGate"]   = m_current.aaMovementGate;
+    j["aaSmoothing"]      = m_current.aaSmoothing;
     std::string path = getFilePath(name.empty() ? m_current.name : name);
     std::ofstream f(path);
     if (!f.is_open()) return false;
@@ -148,6 +189,16 @@ bool Profile::reload() {
         m_current.adsMultiplier    = j.value("ADSMultiplier", m_current.adsMultiplier);
         m_current.acceleration    = j.value("acceleration", m_current.acceleration);
         m_current.deceleration     = j.value("deceleration", m_current.deceleration);
+        // Aim assist — keep existing values if keys are absent (old files).
+        m_current.aaEnabled        = j.value("aaEnabled", m_current.aaEnabled);
+        m_current.aaBubbleAngle    = j.value("aaBubbleAngle", m_current.aaBubbleAngle);
+        m_current.aaMaxDistance    = j.value("aaMaxDistance", m_current.aaMaxDistance);
+        m_current.aaStickiness     = j.value("aaStickiness", m_current.aaStickiness);
+        m_current.aaRotationalGain = j.value("aaRotationalGain", m_current.aaRotationalGain);
+        m_current.aaPullGain       = j.value("aaPullGain", m_current.aaPullGain);
+        m_current.aaRotMaxSpeed    = j.value("aaRotMaxSpeed", m_current.aaRotMaxSpeed);
+        m_current.aaMovementGate   = j.value("aaMovementGate", m_current.aaMovementGate);
+        m_current.aaSmoothing      = j.value("aaSmoothing", m_current.aaSmoothing);
         return true;
     } catch (...) { return false; }
 }

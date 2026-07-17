@@ -3,7 +3,143 @@
 #include <glm/geometric.hpp>
 #include <cmath>
 
-Trainer::Trainer() {}
+// =============================================================================
+// Ray intersection utilities — shared by Trainer + all GameMode subclasses
+// (Modes.cpp). `fwd` MUST be unit length. Returns the entry param t>0 along the
+// ray (eye + fwd*t) of the first surface hit, or -1.0f if no hit.
+// =============================================================================
+
+// Ray vs sphere. Closest point on the ray to `center`; hit if within `radius`.
+float raySphereHitT(const glm::vec3& eye, const glm::vec3& fwd,
+                    const glm::vec3& center, float radius) {
+    glm::vec3 oc = eye - center;
+    float b = glm::dot(oc, fwd);
+    float c = glm::dot(oc, oc) - radius * radius;
+    float disc = b * b - c;
+    if (disc < 0.0f) return -1.0f;
+    float t = -b - std::sqrt(disc);   // nearest intersection
+    if (t < 0.0f) t = -b + std::sqrt(disc);  // ray starts inside → take far hit
+    return t >= 0.0f ? t : -1.0f;
+}
+
+// Ray vs capsule (vertical segment a→b, radius). Distance from ray to the
+// segment <= radius counts as a hit; returns the ray param of the entry point.
+float rayCapsuleHitT(const glm::vec3& eye, const glm::vec3& fwd,
+                     const glm::vec3& a, const glm::vec3& b, float radius) {
+    // Closest approach of ray (eye + s*fwd) to segment (a + t*u).
+    glm::vec3 u = b - a;
+    glm::vec3 w0 = a - eye;
+    float aA = glm::dot(fwd, fwd);     // 1 for unit dir
+    float bB = glm::dot(fwd, u);
+    float cC = glm::dot(u, u);
+    float dD = glm::dot(fwd, w0);
+    float eE = glm::dot(u, w0);
+    float denom = aA * cC - bB * bB;
+    float s, t;
+    const float EPS = 1e-6f;
+    if (denom <= EPS) {
+        s = 0.0f;
+        t = (cC > EPS) ? glm::clamp(eE / cC, 0.0f, 1.0f) : 0.0f;
+    } else {
+        s = glm::clamp((bB * eE - cC * dD) / denom, 0.0f, 1000.0f);
+        t = (bB * s - eE) / cC;
+        if (t < 0.0f) { t = 0.0f; s = glm::clamp(-dD / aA, 0.0f, 1000.0f); }
+        else if (t > 1.0f) { t = 1.0f; s = glm::clamp((bB - dD) / aA, 0.0f, 1000.0f); }
+    }
+    glm::vec3 pRay = eye + fwd * s;
+    glm::vec3 pSeg = a + u * t;
+    float dist = glm::length(pRay - pSeg);
+    if (dist > radius) return -1.0f;
+    return s >= 0.0f ? s : -1.0f;
+}
+
+// Ray vs AABB (slab method). Returns entry t>0, or -1 if miss / origin inside
+// (origin-inside is treated as "not occluding ahead" → -1 so a cover the
+// player is standing inside doesn't block their own aim).
+float rayAABBHitT(const glm::vec3& eye, const glm::vec3& fwd,
+                  const glm::vec3& boxMin, const glm::vec3& boxMax) {
+    float tmin = 0.0f;
+    float tmax = 1e30f;
+    const float EPS = 1e-8f;
+    for (int i = 0; i < 3; ++i) {
+        float o = eye[i];
+        float d = fwd[i];
+        float lo = boxMin[i];
+        float hi = boxMax[i];
+        if (std::abs(d) < EPS) {
+            // ray parallel to this axis slab — miss if origin outside the slab
+            if (o < lo || o > hi) return -1.0f;
+        } else {
+            float inv = 1.0f / d;
+            float t1 = (lo - o) * inv;
+            float t2 = (hi - o) * inv;
+            if (t1 > t2) std::swap(t1, t2);
+            tmin = std::max(tmin, t1);
+            tmax = std::min(tmax, t2);
+            if (tmin > tmax) return -1.0f;
+        }
+    }
+    return tmin > 0.0f ? tmin : -1.0f;  // tmin<=0 means origin inside
+}
+
+// =============================================================================
+Trainer::Trainer() {
+    m_config = AppConfig();          // defaults
+    m_round.roundDuration = m_config.roundDuration;
+    m_round.countdownSec   = m_config.countdownSec;
+    buildMode();                     // construct the default (Tracking) mode
+}
+
+void Trainer::buildMode() {
+    // Construct the concrete subclass for m_modeId via the factory in Modes.cpp.
+    // (Trainer only holds the abstract base via unique_ptr, so it doesn't need
+    // the concrete class definitions.)
+    m_mode = makeGameMode(m_modeId, m_config);
+    if (m_mode) {
+        m_mode->onEnter();
+        m_round.phase = RoundPhase::Idle;
+        m_round.phaseTimer = 0.0;
+        m_round.countdownDisplay = 0;
+        m_round.startRequested = false;
+    }
+}
+
+void Trainer::setMode(GameModeId id, const AppConfig& config) {
+    m_modeId = id;
+    m_config = config;
+    m_round.roundDuration = config.roundDuration;
+    m_round.countdownSec   = config.countdownSec;
+    buildMode();
+}
+
+void Trainer::applyConfig(const AppConfig& config) {
+    m_config = config;
+    m_round.roundDuration = config.roundDuration;
+    m_round.countdownSec   = config.countdownSec;
+    // Live-apply: update the active mode's snapshot + re-derive geometry WITHOUT
+    // resetting the round/scores (buildMode would reset phase→Idle, killing any
+    // in-progress round whenever a slider is dragged — that was the "参数改了
+    // 不立即生效" + needing-a-mode-switch symptom). The mode's applyLiveConfig
+    // keeps motion state + scores intact.
+    if (m_mode) m_mode->applyLiveConfig(config);
+}
+
+void Trainer::requestRoundStart() { m_round.requestStart(); }
+
+void Trainer::fire() {
+    if (!m_mode) return;
+    if (m_round.phase != RoundPhase::Playing) return;
+    if (!m_mode->rtIsFire()) return;   // non-shooting modes ignore fire
+    float fx, fy, fz;
+    cameraForward(fx, fy, fz);
+    glm::vec3 eye = m_camera.getPosition();
+    m_mode->onFire(eye, glm::vec3(fx, fy, fz));
+}
+
+const ModeScore& Trainer::getScore() const {
+    static const ModeScore empty{};
+    return m_mode ? m_mode->score() : empty;
+}
 
 // =============================================================================
 // Player movement & physics (WASD + left stick + jump + gravity)
@@ -20,8 +156,12 @@ void Trainer::updatePlayer(const StickState& input, double dt) {
     float moveY = input.moveY;
 
     // Left stick overrides if active (XInput deadzone already applied upstream).
+    // XInput sThumbLX/LY: right=+, up=+. moveX +1 = strafe right, moveY +1 =
+    // forward (W). So both map directly — NO sign flip. (The old `-leftY` was a
+    // bug: it made push-up = walk backward. Don't confuse with SDL joystick
+    // axes, which report up as negative.)
     if (std::abs(input.leftX) > 0.05f) moveX = input.leftX;
-    if (std::abs(input.leftY) > 0.05f) moveY = -input.leftY;
+    if (std::abs(input.leftY) > 0.05f) moveY = input.leftY;
 
     // Jump: Space (keyboard) or A button (controller) — only when on ground.
     if (input.jumpRequested && m_player.grounded) {
@@ -78,17 +218,67 @@ void Trainer::updatePlayer(const StickState& input, double dt) {
         if (m_player.vy > 0.0f) m_player.vy = 0.0f;
     }
 
+    // --- Collide with solid cover boxes (XZ-plane disc vs AABB). The active
+    // mode (e.g. CoverTrackingMode) exposes its colliders via getCollisionAABBs.
+    // We treat the player as a horizontal disc of PLAYER_RADIUS at (x,z) and
+    // push it out of any AABB it overlaps, stopping the velocity into the box.
+    if (m_mode) {
+        std::vector<AABB> boxes;
+        m_mode->getCollisionAABBs(boxes);
+        for (const AABB& box : boxes) {
+            // Closest point on the AABB (in XZ) to the player center. Y is
+            // ignored: if the player's vertical span [y, y+eyeHeight] overlaps
+            // the box's Y span, the box blocks horizontally.
+            bool yOverlap = (m_player.y < box.max.y) &&
+                            (m_player.y + eyeHeight > box.min.y);
+            if (!yOverlap) continue;
+            float cx = std::clamp(m_player.x, box.min.x, box.max.x);
+            float cz = std::clamp(m_player.z, box.min.z, box.max.z);
+            float dx = m_player.x - cx;
+            float dz = m_player.z - cz;
+            float d2 = dx * dx + dz * dz;
+            if (d2 > PLAYER_RADIUS * PLAYER_RADIUS) continue;  // no overlap
+
+            if (d2 > 1e-8f) {
+                // Outside the box face: push out along the shortest axis.
+                float d = std::sqrt(d2);
+                float push = PLAYER_RADIUS - d;
+                float nx = dx / d, nz = dz / d;
+                m_player.x += nx * push;
+                m_player.z += nz * push;
+            } else {
+                // Player center is inside the box: push out on the nearest face.
+                float distMinX = m_player.x - box.min.x;
+                float distMaxX = box.max.x - m_player.x;
+                float distMinZ = m_player.z - box.min.z;
+                float distMaxZ = box.max.z - m_player.z;
+                float m = std::min({distMinX, distMaxX, distMinZ, distMaxZ});
+                if (m == distMinX)      m_player.x = box.min.x - PLAYER_RADIUS;
+                else if (m == distMaxX) m_player.x = box.max.x + PLAYER_RADIUS;
+                else if (m == distMinZ) m_player.z = box.min.z - PLAYER_RADIUS;
+                else                    m_player.z = box.max.z + PLAYER_RADIUS;
+            }
+            // Kill velocity into the box so the player doesn't stick sliding in.
+            m_player.vx = 0.0f;
+            m_player.vz = 0.0f;
+        }
+    }
+
     // Sync camera eye to player feet + eye height.
     m_camera.setPosition(m_player.x, m_player.y + eyeHeight, m_player.z);
 }
 
 // =============================================================================
-// Mouse aim path — called when NOT interacting with UI.
-// delta is already a per-frame angle (no dt multiply).
+// Mouse aim path — called when NOT interacting with UI. delta is already a
+// per-frame angle (no dt multiply). Round + mode advance happens first (shared
+// with the controller path) so the round/target/scoring run in mouse mode too.
 // =============================================================================
 void Trainer::updateWithMouse(const StickState& input, float mouseDX, float mouseDY,
                                 float sensX, float sensY,
                                 float adsMultiplier, double dt) {
+    (void)input;  // mouse path uses SDL relative motion, not the stick state
+    advanceRoundAndMode(dt);
+
     setCrashStep("[T-mouse] updateWithMouse");
     float yawDelta   = -mouseDX * sensX;
     float pitchDelta = -mouseDY * sensY;
@@ -99,18 +289,74 @@ void Trainer::updateWithMouse(const StickState& input, float mouseDX, float mous
 }
 
 // =============================================================================
-// Controller aim path — response curve + camera yaw/pitch only.
-// Player movement and target update are handled separately by App.
+// advanceRoundAndMode — shared by controller + mouse paths. Drives the round
+// state machine and the active GameMode one frame, filling m_sceneView + setting
+// m_lastAimed. Called every frame regardless of input mode so the round timer,
+// target motion, hit-test and scoring all keep running in both modes.
+// =============================================================================
+void Trainer::advanceRoundAndMode(double dt) {
+    if (!m_mode) return;
+    setCrashStep("[T] round.update");
+    m_round.update(dt, *m_mode);
+
+    setCrashStep("[T] mode.update");
+    float fx, fy, fz;
+    cameraForward(fx, fy, fz);
+    glm::vec3 eye = m_camera.getPosition();
+    glm::vec3 fwd(fx, fy, fz);
+    // Only advance target motion during Playing; other phases keep it static
+    // (cleaner countdown/finished feel), but still produce a SceneView so the
+    // scene renders (target idle).
+    m_sceneView.targets.clear();
+    m_sceneView.covers.clear();
+    double modeDt = (m_round.phase == RoundPhase::Playing) ? dt : 0.0;
+    m_lastAimed = m_mode->update(modeDt, eye, fwd, m_sceneView);
+}
+
+// =============================================================================
+// Controller aim path — response curve + aim assist + camera. Round + mode
+// advance happens first (shared with mouse path via advanceRoundAndMode).
 // =============================================================================
 void Trainer::update(const StickState& input, double dt) {
-    bool ads = input.RT > 0.5f;
-    float adsMult = ads ? getProfile().adsMultiplier : 1.0f;
+    // Advance round + mode first (also runs in mouse path).
+    advanceRoundAndMode(dt);
+
+    // ADS: tracking family uses RT>0.5 / LT>0.5 as ADS; shooting family uses RT
+    // to fire (handled in fire()) so RT is NOT ADS there.
+    bool tracking = (!m_mode || m_mode->isTrackingFamily());
+    bool ads = tracking ? (input.RT > 0.5f) : false;
+    bool ltAds = tracking ? (input.LT > 0.5f) : false;
+    float adsMult = (ads || ltAds) ? getProfile().adsMultiplier : 1.0f;
 
     setCrashStep("[T] responseCurve");
+    // XInput sThumbRX: right=+. But camera yaw+ = turn LEFT (forward.x =
+    // -sin yaw), so to make stick-right = look-right we feed -rightX — the
+    // same sign flip the mouse path applies (-mouseDX). sThumbRY up=+ already
+    // maps to pitch+ (look up), so rightY needs no flip.
     auto vel = m_responseCurve.process(
-        input.rightX, input.rightY,
+        -input.rightX, input.rightY,
         getProfile(), adsMult, dt
     );
+
+    // ---- Aim assist (controller path ONLY) ----
+    setCrashStep("[T] aimAssist");
+    float fx, fy, fz;
+    cameraForward(fx, fy, fz);
+    glm::vec3 eye = m_camera.getPosition();
+    glm::vec3 fwd(fx, fy, fz);
+    glm::vec3 tgtPos(0.0f), tgtVel(0.0f);
+    bool hasAA = m_mode->getAATarget(tgtPos, tgtVel);
+    float moveMag = std::clamp(
+        std::sqrt(input.leftX * input.leftX + input.leftY * input.leftY
+                  + input.moveX * input.moveX + input.moveY * input.moveY),
+        0.0f, 1.0f);
+    if (hasAA) {
+        auto aa = m_aimAssist.apply(vel.yawSpeed, vel.pitchSpeed, eye,
+                                    fwd, tgtPos, tgtVel,
+                                    moveMag, getProfile(), dt);
+        vel.yawSpeed   = aa.yawSpeed;
+        vel.pitchSpeed = aa.pitchSpeed;
+    }
 
     setCrashStep("[T] camera.update");
     m_camera.update(vel.yawSpeed, vel.pitchSpeed, dt);
@@ -136,111 +382,77 @@ void Trainer::cameraForward(float& fx, float& fy, float& fz) const {
     fx = fwd.x; fy = fwd.y; fz = fwd.z;
 }
 
-// -----------------------------------------------------------------------------
-// Aim-hit test: branches on target model.
-//   Sphere : ray-sphere — distance from ray to center <= radius.
-//   Capsule: ray vs vertical line segment (cylinder axis) — distance from ray
-//            to the segment <= radius. The segment runs from y-hh to y+hh,
-//            where hh = (capsuleHeight - 2*radius)/2 (the straight cylinder
-//            part); hemispherical caps are approximated by treating the whole
-//            segment length as capsuleHeight-2*radius and clamping, which is
-//            close enough for a trainer.
-// -----------------------------------------------------------------------------
-namespace {
-// Distance from a ray (origin o, unit dir d) to a segment (a->b).
-float raySegDist(const glm::vec3& o, const glm::vec3& d,
-                 const glm::vec3& a, const glm::vec3& b)
-{
-    glm::vec3 u = b - a;            // segment dir
-    glm::vec3 w0 = a - o;
-    float aA = glm::dot(d, d);      // 1 for unit dir
-    float bB = glm::dot(d, u);
-    float cC = glm::dot(u, u);
-    float dD = glm::dot(d, w0);
-    float eE = glm::dot(u, w0);
-    float denom = aA * cC - bB * bB;
-    float s, t;
-    const float EPS = 1e-6f;
-    if (denom <= EPS) {
-        // parallel — clamp s to 0 and project
-        s = 0.0f;
-        t = (cC > EPS) ? glm::clamp(eE / cC, 0.0f, 1.0f) : 0.0f;
-    } else {
-        s = glm::clamp((bB * eE - cC * dD) / denom, 0.0f, 1000.0f);
-        t = (bB * s - eE) / cC;
-        if (t < 0.0f) { t = 0.0f; s = glm::clamp(-dD / aA, 0.0f, 1000.0f); }
-        else if (t > 1.0f) { t = 1.0f; s = glm::clamp((bB - dD) / aA, 0.0f, 1000.0f); }
+// =============================================================================
+// RoundManager — Idle / Countdown / Playing / Finished state machine.
+// =============================================================================
+void RoundManager::requestStart() {
+    if (phase == RoundPhase::Idle || phase == RoundPhase::Finished) {
+        startRequested = true;
     }
-    glm::vec3 pRay = o + d * s;
-    glm::vec3 pSeg = a + u * t;
-    return glm::length(pRay - pSeg);
-}
-} // namespace
-
-bool Trainer::isAimingAtTarget() const {
-    const TargetState& tgt = m_target.getState();
-    const CameraState& cam = m_camera.getState();
-
-    float fx, fy, fz;
-    cameraForward(fx, fy, fz);
-    glm::vec3 fwd(fx, fy, fz);
-    const glm::vec3 eye(cam.x, cam.y, cam.z);
-
-    if (m_target.getModel() == TargetModel::Capsule) {
-        // Vertical segment through the target center, length = straight part.
-        float r = tgt.radius;
-        float straight = std::max(0.0f, m_target.capsuleHeight - 2.0f * r);
-        float hh = straight * 0.5f;
-        glm::vec3 a(tgt.x, tgt.y - hh, tgt.z);
-        glm::vec3 b(tgt.x, tgt.y + hh, tgt.z);
-        float dist = raySegDist(eye, fwd, a, b);
-        return dist <= (r + 0.05f);
-    }
-
-    // Sphere
-    glm::vec3 tgtPos(tgt.x, tgt.y, tgt.z);
-    glm::vec3 toTarget = tgtPos - eye;
-    float t = glm::dot(toTarget, fwd);
-    if (t < 0.0f) return false;  // behind camera
-    glm::vec3 closest = eye + fwd * t;
-    float dist = glm::length(tgtPos - closest);
-    return dist <= (tgt.radius + 0.05f);
 }
 
-// -----------------------------------------------------------------------------
-// Scoring: +1 point per frame while aimed at the target. If the score does not
-// change for 5 seconds, the current run is banked into best-score and reset.
-// -----------------------------------------------------------------------------
-void Trainer::updateScore(bool aimed, double dt) {
-    int prev = m_currentScore;
-    if (aimed) {
-        // +1 per frame while on target. dt is clamped to ~1/144..1/10s in App,
-        // so this is a smooth ramp rather than a frame-rate-sensitive counter.
-        m_currentScore += 1;
-    }
-
-    if (m_currentScore != prev) {
-        // Score changed this frame → reset the idle timer.
-        m_idleTimer = 0.0;
-    } else {
-        m_idleTimer += dt;
-        // 5s of no change → bank current as best, then clear the run.
-        if (m_idleTimer >= 5.0) {
-            if (m_currentScore > m_bestScore) {
-                m_bestScore = m_currentScore;
+RoundPhase RoundManager::update(double dt, GameMode& mode) {
+    switch (phase) {
+        case RoundPhase::Idle:
+            if (startRequested) {
+                startRequested = false;
+                mode.resetRound();
+                phase = RoundPhase::Countdown;
+                phaseTimer = static_cast<double>(countdownSec);
+                countdownDisplay = static_cast<int>(std::ceil(phaseTimer));
             }
-            m_currentScore = 0;
-            m_idleTimer = 0.0;
+            break;
+
+        case RoundPhase::Countdown: {
+            phaseTimer -= dt;
+            int disp = static_cast<int>(std::ceil(phaseTimer));
+            if (disp < 0) disp = 0;
+            countdownDisplay = disp;
+            if (phaseTimer <= 0.0) {
+                phase = RoundPhase::Playing;
+                phaseTimer = static_cast<double>(roundDuration);
+                countdownDisplay = 0;
+            }
+            break;
         }
+
+        case RoundPhase::Playing:
+            phaseTimer -= dt;
+            if (phaseTimer <= 0.0) {
+                phaseTimer = 0.0;
+                mode.onRoundEnd();   // bank best-of-rounds record
+                phase = RoundPhase::Finished;
+            }
+            break;
+
+        case RoundPhase::Finished:
+            if (startRequested) {
+                startRequested = false;
+                mode.resetRound();
+                phase = RoundPhase::Countdown;
+                phaseTimer = static_cast<double>(countdownSec);
+                countdownDisplay = static_cast<int>(std::ceil(phaseTimer));
+            }
+            break;
     }
+    return phase;
 }
 
+double RoundManager::playingRemaining() const {
+    return phase == RoundPhase::Playing ? std::max(0.0, phaseTimer) : 0.0;
+}
+
+// -----------------------------------------------------------------------------
+// Full reset (player/camera/round); mode is rebuilt so its best-of-rounds
+// records are cleared too. Used on a global reset (not per-round; per-round is
+// handled by RoundManager via mode.resetRound()).
+// -----------------------------------------------------------------------------
 void Trainer::reset() {
     m_camera = Camera();
-    m_target.reset();
     m_responseCurve = ResponseCurve();
+    m_aimAssist = AimAssist();
     m_player = {};
-    m_currentScore = 0;
-    m_idleTimer = 0.0;
-    // bestScore is deliberately kept across a reset — it's the high score.
+    m_sceneView = SceneView();
+    m_lastAimed = false;
+    buildMode();   // fresh mode + Idle phase (clears mode best-of-rounds)
 }

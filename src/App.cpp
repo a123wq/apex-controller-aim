@@ -150,17 +150,14 @@ void App::initModules() {
 }
 
 // =============================================================================
-// Push persisted config → live state (target model/size/speeds, mouse sens).
+// Push persisted config → live state (game mode + mode geometry + mouse sens).
+// The trainer rebuilds its active GameMode with the new config snapshot.
 // =============================================================================
 void App::applyConfig() {
     AppConfig& c = m_config.data();
-    Target& tgt = m_trainer.getTarget();
-    tgt.setModel(c.targetModel);
-    tgt.stateRef().radius = c.targetRadius;
-    tgt.minSpeed = c.targetMinSpeed;
-    tgt.maxSpeed = c.targetMaxSpeed;
-    tgt.aimRedirectMin = c.aimRedirectMin;
-    tgt.aimRedirectMax = c.aimRedirectMax;
+    // Push mode + geometry into the trainer (rebuilds the active mode).
+    m_trainer.setMode(static_cast<GameModeId>(c.gameMode), c);
+    m_lastAppliedConfig = c;   // remember what the live mode was built from
     m_mouseSensitivityX = c.mouseSensX;
     m_mouseSensitivityY = c.mouseSensY;
     m_config.clearDirty();
@@ -168,19 +165,24 @@ void App::applyConfig() {
 
 // =============================================================================
 // Pull live UI-editable values → config, mark dirty so it persists next frame.
-// Call after UI::render so slider edits are captured.
+// Call after UI::render so slider edits are captured. If the UI changed any
+// mode-geometry field (sliders bind directly to m_config.data() by ref), rebuild
+// the active GameMode so the edit takes effect IMMEDIATELY — not only on the
+// next mode switch.
 // =============================================================================
 void App::syncConfigFromUI() {
     AppConfig& c = m_config.data();
-    Target& tgt = m_trainer.getTarget();
-    if (c.targetModel    != tgt.getModel())          { c.targetModel = tgt.getModel(); m_config.markDirty(); }
-    if (c.targetRadius   != tgt.stateRef().radius)   { c.targetRadius = tgt.stateRef().radius; m_config.markDirty(); }
-    if (c.targetMinSpeed != tgt.minSpeed)            { c.targetMinSpeed = tgt.minSpeed; m_config.markDirty(); }
-    if (c.targetMaxSpeed != tgt.maxSpeed)            { c.targetMaxSpeed = tgt.maxSpeed; m_config.markDirty(); }
-    if (c.aimRedirectMin != tgt.aimRedirectMin)      { c.aimRedirectMin = tgt.aimRedirectMin; m_config.markDirty(); }
-    if (c.aimRedirectMax != tgt.aimRedirectMax)      { c.aimRedirectMax = tgt.aimRedirectMax; m_config.markDirty(); }
-    if (c.mouseSensX     != m_mouseSensitivityX)     { c.mouseSensX = m_mouseSensitivityX; m_config.markDirty(); }
-    if (c.mouseSensY     != m_mouseSensitivityY)     { c.mouseSensY = m_mouseSensitivityY; m_config.markDirty(); }
+    c.gameMode = static_cast<int>(m_trainer.getModeId());
+    if (c.mouseSensX != m_mouseSensitivityX) { c.mouseSensX = m_mouseSensitivityX; }
+    if (c.mouseSensY != m_mouseSensitivityY) { c.mouseSensY = m_mouseSensitivityY; }
+
+    // Live-apply mode-geometry edits: if the user dragged a slider that changed
+    // a field the active mode snapshotted at construction, rebuild the mode now.
+    if (appConfigDiffers(c, m_lastAppliedConfig)) {
+        m_trainer.applyConfig(c);          // rebuilds the active mode with new values
+        m_lastAppliedConfig = c;
+        m_config.markDirty();              // persist next frame
+    }
 }
 
 // =============================================================================
@@ -222,6 +224,21 @@ void App::run() {
             m_controllerPrev = conn;
         }
 
+        // 3c. R2/RT (controller fire/shoulder) edge detection. RT is analog, so
+        // detect a rising edge (>0.5) when the panel is closed and route it to
+        // start-round + fire (the mode decides which applies). Mirrors the LMB
+        // path so either input starts/fires.
+        if (!m_paramsVisible && m_inputMode == InputMode::Controller) {
+            bool rt = m_input.getState().RT > 0.5f;
+            if (rt && !m_rtWasDown) {
+                m_fireRequested = true;
+                m_startRequested = true;
+            }
+            m_rtWasDown = rt;
+        } else {
+            m_rtWasDown = false;  // reset so re-entering controller doesn't double-fire
+        }
+
         // 4. ImGui NewFrame
         #if HAS_IMGUI_BACKENDS
         ImGui_ImplOpenGL3_NewFrame();
@@ -245,32 +262,28 @@ void App::run() {
             m_trainer.updatePlayer(st, m_deltaTime);
         }
 
-        // 6. Target physics — ALWAYS runs.
-        setCrashStep("[loop] target.update");
-        m_trainer.getTarget().update(m_deltaTime);
-        bool aimed = m_trainer.isAimingAtTarget();
-        {
-            float fx, fy, fz;
-            m_trainer.cameraForward(fx, fy, fz);
-            m_trainer.getTarget().setAimed(aimed, fx, fy, fz, m_deltaTime);
-        }
-
-        // 6b. Scoring — award points while aimed, reset run after 5s idle.
-        m_trainer.updateScore(aimed, m_deltaTime);
+        // 6. Target physics + scoring now live inside the active GameMode, driven
+        // by Trainer::update / updateWithMouse (below). No per-target work here.
 
         // 7. Camera aim rotation — runs unless the parameter panel is open.
         // When the panel is visible the mouse is free (pointer shown) for
         // clicking UI, so we must NOT consume its motion as aim rotation.
         if (m_paramsVisible) {
             // Drain any pending relative motion so the next resume frame
-            // doesn't jump the view.
+            // doesn't jump the view. Still advance the round/mode so the scene
+            // (and round timer) keep ticking behind the panel.
             if (m_inputMode == InputMode::Mouse) {
                 SDL_GetRelativeMouseState(nullptr, nullptr);
             }
+            m_trainer.advanceRoundAndMode(m_deltaTime);
         } else if (m_inputMode == InputMode::Mouse) {
             int mx = 0, my = 0;
             SDL_GetRelativeMouseState(&mx, &my);
-            float adsMult = m_lmbDown ? m_trainer.getProfile().adsMultiplier : 1.0f;
+            // ADS in mouse mode: LMB held = ADS (tracking family only). In
+            // shooting family LMB fires instead (edge-detected in pollEvents).
+            bool tracking = m_trainer.getModeId() != GameModeId::ThreeTarget
+                          && m_trainer.getModeId() != GameModeId::SixTarget;
+            float adsMult = (tracking && m_lmbDown) ? m_trainer.getProfile().adsMultiplier : 1.0f;
             setCrashStep("[loop] updateWithMouse");
             m_trainer.updateWithMouse(
                 m_input.getState(),
@@ -280,6 +293,18 @@ void App::run() {
         } else {
             setCrashStep("[loop] update(controller)");
             m_trainer.update(m_input.getState(), m_deltaTime);
+        }
+
+        // 7b. Fire / round-start edges (LMB + R2) — handled in pollEvents by
+        // setting m_fireRequested / m_startRequested; apply them here so the
+        // round/mode state is current.
+        if (m_startRequested) {
+            m_trainer.requestRoundStart();
+            m_startRequested = false;
+        }
+        if (m_fireRequested) {
+            m_trainer.fire();
+            m_fireRequested = false;
         }
 
         // 8. UI render
@@ -296,12 +321,23 @@ void App::run() {
         }
 
         bool quitRequested = false;
+        GameModeId modeSwitch = m_trainer.getModeId();
+        const RoundManager& rm = m_trainer.getRound();
         m_ui.render(profile, available, currentIndex,
                     m_trainer.getProfileManager(), quitRequested,
                     m_inputMode, m_mouseSensitivityX, m_mouseSensitivityY,
-                    m_trainer.getTarget(), m_trainer.isAimingAtTarget(),
-                    m_trainer.getCurrentScore(), m_trainer.getBestScore(),
-                    m_paramsVisible);
+                    m_config.data(),
+                    m_trainer.getModeId(), rm.phase, rm.countdownDisplay,
+                    rm.playingRemaining(), m_trainer.getScore(),
+                    m_trainer.isAABubbleActive(),
+                    modeSwitch, m_paramsVisible);
+
+        // 8a. Apply a mode switch requested by the UI Game Mode combo.
+        if (modeSwitch != m_trainer.getModeId()) {
+            m_config.data().gameMode = static_cast<int>(modeSwitch);
+            m_trainer.setMode(modeSwitch, m_config.data());
+            m_config.markDirty();
+        }
 
         if (quitRequested) {
             m_running = false; break;
@@ -376,6 +412,13 @@ void App::pollEvents() {
                         SDL_SetWindowGrab(m_window, SDL_TRUE);
                         SDL_SetRelativeMouseMode(SDL_TRUE);
                         SDL_ShowCursor(SDL_DISABLE);
+                    }
+                    // LMB = start round / fire (when the panel is closed). The
+                    // current mode decides which: fire() is a no-op unless the
+                    // mode's rtIsFire(); requestRoundStart() handles the rest.
+                    if (!m_paramsVisible) {
+                        m_fireRequested = true;
+                        m_startRequested = true;
                     }
                 }
                 break;
@@ -464,10 +507,8 @@ void App::pollEvents() {
 
 // =============================================================================
 void App::renderFrame() {
-    Target& tgt = m_trainer.getTarget();
-    m_renderer.draw(m_trainer.getCameraState(), m_trainer.getTargetState(),
-                    m_trainer.getPlayerState(), m_trainer.isAimingAtTarget(),
-                    tgt.getModel(), tgt.capsuleHeight);
+    m_renderer.draw(m_trainer.getCameraState(), m_trainer.getPlayerState(),
+                    m_trainer.getSceneView());
     #if HAS_IMGUI_BACKENDS
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
     #endif

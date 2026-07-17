@@ -96,16 +96,21 @@ void main() {
 
         FragColor = vec4(lit, 1.0);
     } else if (uDrawID == 1) {
-        // ---- Lit sphere: Lambertian diffuse + ambient + rim ----
+        // ---- Lit object (sphere/capsule/cover box): clean Lambertian diffuse +
+        //      ambient. No colored rim term (the old blue rim produced a
+        //      base→blue gradient across the surface, which read as a weird
+        //      "gradient color" especially on capsules/pillars). The object's
+        //      hue comes purely from uBaseColor; shading is grayscale so a
+        //      white target stays white and a grey target stays grey. ----
         vec3 N = normalize(vNormal);
         vec3 L = normalize(uLightDir);
         float diff = max(dot(N, L), 0.0);
 
-        vec3 V = normalize(uCamPos - vWorldPos);
-        float rim = pow(1.0 - max(dot(N, V), 0.0), 3.0);
+        // Wrap lighting so the shadow side isn't pure black (cheap fake ambient).
+        float wrap = max(dot(N, L) * 0.5 + 0.5, 0.0);  // 0..1, softer than diff
 
-        vec3 col = uBaseColor * (0.25 + diff * 0.75);
-        col += vec3(0.5, 0.6, 1.0) * rim * 0.35;
+        vec3 col = uBaseColor * (0.35 + wrap * 0.65);
+        col *= uLightColor;
 
         FragColor = vec4(col, 1.0);
     } else {
@@ -213,8 +218,9 @@ bool Renderer::init(int windowWidth, int windowHeight) {
     if (!m_crosshairShader.compile(CROSSHAIR_VERTEX, CROSSHAIR_FRAGMENT)) return false;
 
     buildRoom();
-    buildSphere(16, 24);
-    buildCapsule(20, 12);
+    buildSphere(32, 48);
+    buildCapsule(32, 16);
+    buildBox();
     buildCrosshair();
 
     return true;
@@ -232,6 +238,7 @@ void Renderer::shutdown() {
     delVAO(m_wallX2VAO);   del(m_wallX2VBO);   del(m_wallX2IBO);
     delVAO(m_sphereVAO);   del(m_sphereVBO);   del(m_sphereIBO);
     delVAO(m_capsuleVAO);  del(m_capsuleVBO);  del(m_capsuleIBO);
+    delVAO(m_boxVAO);      del(m_boxVBO);      del(m_boxIBO);
     delVAO(m_crosshairVAO); del(m_crosshairVBO);
 }
 
@@ -441,6 +448,74 @@ void Renderer::buildCapsule(int seg, int hemiRings) {
 }
 
 // =============================================================================
+// Cover box: unit cube spanning -0.5..0.5 on each axis. 24 verts (4 per face,
+// independent normals) + 36 indices. Scaled at runtime per cover by halfExtents
+// (translate(center) * scale(halfExtents)). Reuses the 32-byte {pos,normal,uv}
+// vertex layout + attrib 0/1/2 used by sphere/capsule so the scene shader draws
+// it under uDrawID==1 with per-draw uBaseColor.
+// =============================================================================
+void Renderer::buildBox() {
+    struct Vertex { float x, y, z, nx, ny, nz, u, v; };
+    // 6 faces, each 4 verts. Order so outward normals + CCW front faces.
+    const Vertex verts[24] = {
+        // +X face (right), normal (1,0,0)
+        { 0.5f,-0.5f,-0.5f,  1,0,0, 0,0},
+        { 0.5f, 0.5f,-0.5f,  1,0,0, 0,1},
+        { 0.5f, 0.5f, 0.5f,  1,0,0, 1,1},
+        { 0.5f,-0.5f, 0.5f,  1,0,0, 1,0},
+        // -X face (left), normal (-1,0,0)
+        {-0.5f,-0.5f, 0.5f, -1,0,0, 0,0},
+        {-0.5f, 0.5f, 0.5f, -1,0,0, 0,1},
+        {-0.5f, 0.5f,-0.5f, -1,0,0, 1,1},
+        {-0.5f,-0.5f,-0.5f, -1,0,0, 1,0},
+        // +Y face (top), normal (0,1,0)
+        {-0.5f, 0.5f,-0.5f,  0,1,0, 0,0},
+        {-0.5f, 0.5f, 0.5f,  0,1,0, 0,1},
+        { 0.5f, 0.5f, 0.5f,  0,1,0, 1,1},
+        { 0.5f, 0.5f,-0.5f,  0,1,0, 1,0},
+        // -Y face (bottom), normal (0,-1,0)
+        {-0.5f,-0.5f, 0.5f,  0,-1,0, 0,0},
+        {-0.5f,-0.5f,-0.5f,  0,-1,0, 0,1},
+        { 0.5f,-0.5f,-0.5f,  0,-1,0, 1,1},
+        { 0.5f,-0.5f, 0.5f,  0,-1,0, 1,0},
+        // +Z face (far), normal (0,0,1)
+        {-0.5f,-0.5f, 0.5f,  0,0,1, 0,0},
+        { 0.5f,-0.5f, 0.5f,  0,0,1, 0,1},
+        { 0.5f, 0.5f, 0.5f,  0,0,1, 1,1},
+        {-0.5f, 0.5f, 0.5f,  0,0,1, 1,0},
+        // -Z face (near), normal (0,0,-1)
+        { 0.5f,-0.5f,-0.5f,  0,0,-1, 0,0},
+        {-0.5f,-0.5f,-0.5f,  0,0,-1, 0,1},
+        {-0.5f, 0.5f,-0.5f,  0,0,-1, 1,1},
+        { 0.5f, 0.5f,-0.5f,  0,0,-1, 1,0},
+    };
+    const unsigned int idx[36] = {
+        0,1,2, 0,2,3,        // +X
+        4,5,6, 4,6,7,        // -X
+        8,9,10, 8,10,11,     // +Y
+        12,13,14, 12,14,15,  // -Y
+        16,17,18, 16,18,19,  // +Z
+        20,21,22, 20,22,23,  // -Z
+    };
+    glGenVertexArrays(1, &m_boxVAO);
+    glGenBuffers(1, &m_boxVBO);
+    glGenBuffers(1, &m_boxIBO);
+    glBindVertexArray(m_boxVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, m_boxVBO);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_boxIBO);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(idx), idx, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)0);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(3 * sizeof(float)));
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(6 * sizeof(float)));
+    glEnableVertexAttribArray(2);
+    glBindVertexArray(0);
+    m_boxIndexCount = 36;
+}
+
+// =============================================================================
 void Renderer::buildCrosshair() {
     constexpr float GAP = 0.015f, LEN = 0.04f;
     struct V { float x, y; };
@@ -483,7 +558,7 @@ glm::mat4 Renderer::computeProjectionMatrix() const {
 }
 
 // =============================================================================
-void Renderer::draw(const CameraState& camera, const TargetState& target, const PlayerState& player, bool aimed, TargetModel model, float capsuleHeight) {
+void Renderer::draw(const CameraState& camera, const PlayerState& player, const SceneView& scene) {
     glClearColor(0.08f, 0.08f, 0.08f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -520,39 +595,51 @@ void Renderer::draw(const CameraState& camera, const TargetState& target, const 
     drawQuad(m_wallX2VAO, m_wallX2IndexCount);
     glEnable(GL_CULL_FACE);  // re-enable for 3D objects
 
-    // ---- Target (sphere or capsule) ----
-    // Color reflects aim state: white when on target, peach when not.
+    // ---- Cover boxes (lit, neutral grey). Drawn before targets so the depth
+    // buffer is populated and targets that are behind cover get occluded
+    // naturally by depth testing. Boxes use the same uDrawID==1 path.
     m_sceneShader.setUniform1i("uDrawID", 1);
-    if (aimed) {
-        m_sceneShader.setUniform3f("uBaseColor", 1.00f, 1.00f, 1.00f);  // white
-    } else {
-        m_sceneShader.setUniform3f("uBaseColor", 1.00f, 0.65f, 0.55f);  // peach
+    m_sceneShader.setUniform3f("uBaseColor", 0.5f, 0.5f, 0.5f);  // neutral grey
+    glBindVertexArray(m_boxVAO);
+    for (const RenderCover& cov : scene.covers) {
+        // Unit cube spans -0.5..0.5, so scale by halfExtents to get the box size.
+        glm::mat4 m = glm::translate(glm::mat4(1.0f), cov.center);
+        m = glm::scale(m, cov.halfExtents);
+        m_sceneShader.setUniformMatrix4fv("uModel", m);
+        glDrawElements(GL_TRIANGLES, m_boxIndexCount, GL_UNSIGNED_INT, 0);
     }
-    glm::mat4 tgtModel = glm::translate(glm::mat4(1.0f), glm::vec3(target.x, target.y, target.z));
-    if (model == TargetModel::Capsule) {
-        // Capsule unit geometry: r=1, straight length=1, hemisphere caps r=1
-        // (total unit height = 3). Scale so rendered total = capsuleHeight:
-        //   X,Z = radius,  Y = (capsuleHeight - 2*radius)  (straight part).
-        //   hemispheres come from the radius scaling, so total = straight+2r = capsuleHeight.
-        float r = target.radius;
-        float straightLen = std::max(0.01f, capsuleHeight - 2.0f * r);
-        tgtModel = glm::scale(tgtModel, glm::vec3(r, straightLen, r));
-        m_sceneShader.setUniformMatrix4fv("uModel", tgtModel);
-        glBindVertexArray(m_capsuleVAO);
-        glDrawElements(GL_TRIANGLES, m_capsuleIndexCount, GL_UNSIGNED_INT, 0);
-    } else {
-        tgtModel = glm::scale(tgtModel, glm::vec3(target.radius));
-        m_sceneShader.setUniformMatrix4fv("uModel", tgtModel);
-        glBindVertexArray(m_sphereVAO);
-        glDrawElements(GL_TRIANGLES, m_sphereIndexCount, GL_UNSIGNED_INT, 0);
+
+    // ---- Targets (spheres/capsules) from the active GameMode's SceneView.
+    // Each carries its own position/radius/model/capsuleHeight/color. Invisible
+    // targets (e.g. grid spheres not currently shown) are simply absent from
+    // the list, so nothing is drawn for them — no alpha/blending needed.
+    for (const RenderTarget& t : scene.targets) {
+        m_sceneShader.setUniform3f("uBaseColor", t.color[0], t.color[1], t.color[2]);
+        glm::mat4 m = glm::translate(glm::mat4(1.0f), t.pos);
+        if (t.model == TargetModel::Capsule) {
+            // Capsule unit geometry: r=1, straight length=1, hemisphere caps r=1
+            // (total unit height = 3). Scale so rendered total = capsuleHeight:
+            //   X,Z = radius,  Y = (capsuleHeight - 2*radius)  (straight part).
+            float r = t.radius;
+            float straightLen = std::max(0.01f, t.capsuleHeight - 2.0f * r);
+            m = glm::scale(m, glm::vec3(r, straightLen, r));
+            m_sceneShader.setUniformMatrix4fv("uModel", m);
+            glBindVertexArray(m_capsuleVAO);
+            glDrawElements(GL_TRIANGLES, m_capsuleIndexCount, GL_UNSIGNED_INT, 0);
+        } else {
+            m = glm::scale(m, glm::vec3(t.radius));
+            m_sceneShader.setUniformMatrix4fv("uModel", m);
+            glBindVertexArray(m_sphereVAO);
+            glDrawElements(GL_TRIANGLES, m_sphereIndexCount, GL_UNSIGNED_INT, 0);
+        }
     }
 
     // ---- Player feet marker ----
     m_sceneShader.setUniform1i("uDrawID", 2);
     m_sceneShader.setUniform3f("uBaseColor", 0.20f, 0.75f, 1.0f);
-    tgtModel = glm::translate(glm::mat4(1.0f), glm::vec3(player.x, 0.01f, player.z));
-    tgtModel = glm::scale(tgtModel, glm::vec3(0.25f, 0.03f, 0.25f));
-    m_sceneShader.setUniformMatrix4fv("uModel", tgtModel);
+    glm::mat4 pm = glm::translate(glm::mat4(1.0f), glm::vec3(player.x, 0.01f, player.z));
+    pm = glm::scale(pm, glm::vec3(0.25f, 0.03f, 0.25f));
+    m_sceneShader.setUniformMatrix4fv("uModel", pm);
     glBindVertexArray(m_sphereVAO);
     glDrawElements(GL_TRIANGLES, m_sphereIndexCount, GL_UNSIGNED_INT, 0);
 

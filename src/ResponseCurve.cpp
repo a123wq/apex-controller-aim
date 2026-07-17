@@ -40,10 +40,18 @@ float ResponseCurve::applyAcceleration(float target, float accel, float decel,
                                        float dt, float& stored) {
     float diff = target - stored;
     if (std::abs(diff) < 0.001f) { stored = target; return target; }
-    float maxChange = (diff > 0.0f) ? accel : decel;
-    maxChange *= static_cast<float>(dt);
-    if (std::abs(diff) <= maxChange) { stored = target; }
-    else { stored += std::copysignf(maxChange, diff); }
+    // accel/decel are 0..1 APPROACH RATES — not physical deg/s². The profile
+    // values (Classic 0.15/0.12, Linear 0/0) are fractions: 0 = instant
+    // (Linear, no ramp), higher = more ramp-up ("acceleration feel").
+    //
+    // The old implementation did maxChange = accel*dt, which at accel=0.15 and
+    // dt≈1/144 gave ~0.001 deg/s per frame — so the right stick could NEVER
+    // spin the view, and Linear's accel=0 froze it completely. Treat the rate
+    // as a per-frame fraction on a 60fps baseline, made frame-rate independent.
+    float rate = (diff > 0.0f) ? accel : decel;
+    if (rate <= 0.001f) { stored = target; return target; }  // 0 → instant
+    float alpha = std::clamp(rate * static_cast<float>(dt) * 60.0f, 0.0f, 1.0f);
+    stored += diff * alpha;
     return stored;
 }
 
